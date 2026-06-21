@@ -1,0 +1,11 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.htmlprinter">
+
+    <!-- TCP socket đến máy in ESC/POS qua LAN (port 9100) -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- Android PrintManager cho IPP print -->
+    <uses-permission android:name="android.permission.PRINT" />
+
+</manifest>

@@ -1,0 +1,33 @@
+{
+  "name": "react-native-bill-printer",
+  "version": "1.0.0",
+  "description": "Print HTML to physical printers on iOS and Android",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "files": [
+    "src",
+    "ios",
+    "android",
+    "react-native.config.js"
+  ],
+  "keywords": [
+    "react-native",
+    "ios",
+    "android",
+    "print",
+    "html",
+    "printer"
+  ],
+  "peerDependencies": {
+    "react": "*",
+    "react-native": "*"
+  },
+  "codegenConfig": {
+    "name": "RNHtmlPrinterSpec",
+    "type": "modules",
+    "jsSrcsDir": "src",
+    "android": {
+      "javaPackageName": "com.htmlprinter"
+    }
+  }
+}
