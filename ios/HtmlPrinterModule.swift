@@ -325,8 +325,11 @@ class HtmlPrinterModule: NSObject {
     resolve: @escaping RCTPromiseResolveBlock,
     reject: @escaping RCTPromiseRejectBlock
   ) {
-    // Dùng Foundation OutputStream — Swift-friendly, có streamStatus/streamError/write
-    guard let outputS = OutputStream(host: host, port: port) else {
+    // OutputStream(host:port:) không available trên iOS — dùng Stream.getStreamsToHost
+    var inputS: InputStream?
+    var outputS: OutputStream?
+    Stream.getStreamsToHost(withName: host, port: port, inputStream: &inputS, outputStream: &outputS)
+    guard let outputS = outputS else {
       reject("TCP_ERROR", "Failed to create TCP stream to \(host):\(port)", nil)
       return
     }
