@@ -22,8 +22,8 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.pdf.PdfDocument
+import android.os.Bundle
+import android.os.CancellationSignal
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
@@ -162,14 +162,14 @@ class HtmlPrinterModule(
         .setContentType(PrintDocumentInfo.CONTENT_TYPE_DOCUMENT)
         .build()
 
-      adapter.onLayout(null, attrs, attrs, object : PrintDocumentAdapter.LayoutResultCallback() {
+      adapter.onLayout(null, attrs, CancellationSignal(), object : PrintDocumentAdapter.LayoutResultCallback() {
         override fun onLayoutFinished(info: PrintDocumentInfo, changed: Boolean) {
           // Ghi PDF vào writeFd trên background thread
           Thread {
             adapter.onWrite(
               arrayOf(android.print.PageRange.ALL_PAGES),
               writeFd,
-              null,
+              CancellationSignal(),
               object : PrintDocumentAdapter.WriteResultCallback() {
                 override fun onWriteFinished(pages: Array<out android.print.PageRange>) {
                   try {
@@ -193,7 +193,7 @@ class HtmlPrinterModule(
         override fun onLayoutFailed(error: CharSequence?) {
           callback(null, error?.toString() ?: "Layout failed")
         }
-      }, null)
+      }, Bundle())
     } catch (e: Exception) {
       callback(null, e.message)
     }
