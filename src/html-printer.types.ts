@@ -39,6 +39,26 @@ export interface BillPrintOptions {
   printerUrl?: string;
 }
 
+/**
+ * Thông tin lỗi máy in — truyền cho caller qua onError callback.
+ * Caller (empos-app) tự quyết định gửi lên Sentry hay xử lý khác.
+ * Thư viện KHÔNG phụ thuộc Sentry — zero dependency.
+ */
+export interface PrinterErrorInfo {
+  /** Mã lỗi từ native module (TCP_ERROR, RENDER_ERROR, etc.) */
+  errorCode: string;
+  /** Message gốc từ native */
+  message: string;
+  /** Error gốc — để caller log hoặc re-throw */
+  nativeError: Error;
+}
+
+/**
+ * Callback gọi khi xảy ra lỗi in.
+ * Được gọi TRƯỚC khi throw error, cho phép caller capture trước khi propagate.
+ */
+export type PrinterErrorCallback = (info: PrinterErrorInfo) => void;
+
 /** Options cho ESC/POS TCP print */
 export interface EscPosPrintOptions {
   /** IP máy in, ví dụ "192.168.1.100" */
