@@ -3,11 +3,11 @@
  *
  * Hai chế độ in:
  *   1. Silent print qua IPP (printerUrl != "") — gửi PDF trực tiếp tới máy in qua HTTP/IPP
- *   2. Print dialog (printerUrl == "")          — PrintManager hiện dialog chọn máy
+ *   2. Print dialog (printerUrl == "")          — PrintManager hiện dialog chọn máy in
  *
  * Silent print flow (IPP):
- *   WebView render HTML → PDF bytes → HTTP POST tới ipp://IP:631 (IPP over HTTP port 631)
- *   Dùng Android PrintedPdfDocument + okhttp để gửi IPP request
+ *   WebView render HTML → Canvas → Bitmap → PdfDocument → PDF bytes
+ *   → HTTP POST tới ipp://IP:631 (IPP over HTTP port 631)
  *
  * Supported page sizes:
  *   A4  → ISO_A4  (210×297mm)
@@ -22,14 +22,11 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
-import android.os.Bundle
-import android.os.CancellationSignal
+import android.graphics.Paint
+import android.graphics.pdf.PdfDocument
 import android.os.Handler
 import android.os.Looper
-import android.os.ParcelFileDescriptor
 import android.print.PrintAttributes
-import android.print.PrintDocumentAdapter
-import android.print.PrintDocumentInfo
 import android.print.PrintManager
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -41,7 +38,6 @@ import java.io.DataOutputStream
 import java.net.HttpURLConnection
 import java.net.Socket
 import java.net.URL
-import java.nio.ByteBuffer
 
 @ReactModule(name = HtmlPrinterModule.NAME)
 class HtmlPrinterModule(
@@ -106,16 +102,13 @@ class HtmlPrinterModule(
 
       webView.webViewClient = object : WebViewClient() {
         override fun onPageFinished(view: WebView, url: String) {
-          val printManager = activity.getSystemService(Context.PRINT_SERVICE) as PrintManager
-          val adapter = view.createPrintDocumentAdapter(jobName)
-
           if (printerUrl.isNotEmpty()) {
             // ── Chế độ 1: Silent print qua IPP ─────────────────────────────
-            // Collect PDF bytes từ PrintDocumentAdapter rồi gửi qua HTTP/IPP
-            collectPdfBytes(adapter, attrs) { pdfBytes, error ->
+            // WebView → Bitmap → PdfDocument → PDF bytes → IPP over HTTP
+            renderWebViewToPdf(view, attrs) { pdfBytes, error ->
               if (error != null || pdfBytes == null) {
                 promise.reject("PDF_ERROR", error ?: "Failed to generate PDF")
-                return@collectPdfBytes
+                return@renderWebViewToPdf
               }
               // Gửi PDF tới máy in qua IPP over HTTP trên background thread
               Thread {
@@ -125,6 +118,8 @@ class HtmlPrinterModule(
           } else {
             // ── Chế độ 2: Print dialog ──────────────────────────────────────
             try {
+              val printManager = activity.getSystemService(Context.PRINT_SERVICE) as PrintManager
+              val adapter = view.createPrintDocumentAdapter(jobName)
               printManager.print(jobName, adapter, attrs)
               promise.resolve(null)
             } catch (e: Exception) {
@@ -145,57 +140,64 @@ class HtmlPrinterModule(
   }
 
   /**
-   * Thu thập PDF bytes từ PrintDocumentAdapter.
-   * Android PrintDocumentAdapter viết PDF vào file descriptor — đọc lại thành ByteArray.
+   * Render WebView sang Bitmap rồi encode thành PDF bytes.
+   * Tránh dùng PrintDocumentAdapter vì LayoutResultCallback/WriteResultCallback
+   * có package-private constructor không thể subclass từ ngoài package android.print.
    */
-  private fun collectPdfBytes(
-    adapter: PrintDocumentAdapter,
+  private fun renderWebViewToPdf(
+    view: WebView,
     attrs: PrintAttributes,
     callback: (ByteArray?, String?) -> Unit,
   ) {
     try {
-      val pipe = ParcelFileDescriptor.createPipe()
-      val readFd  = pipe[0]
-      val writeFd = pipe[1]
+      val mediaSize = attrs.mediaSize ?: PrintAttributes.MediaSize.ISO_A4
+      // Tính kích thước trang theo pixel (300 DPI)
+      val dpi = 300
+      val pageWidthPx  = (mediaSize.widthMils  * dpi / 1000f).toInt()
+      val pageHeightPx = (mediaSize.heightMils * dpi / 1000f).toInt()
 
-      val info = PrintDocumentInfo.Builder("print_job")
-        .setContentType(PrintDocumentInfo.CONTENT_TYPE_DOCUMENT)
-        .build()
+      // Đo và layout WebView để lấy content height thực
+      val wSpec = android.view.View.MeasureSpec.makeMeasureSpec(pageWidthPx, android.view.View.MeasureSpec.EXACTLY)
+      val hSpec = android.view.View.MeasureSpec.makeMeasureSpec(0, android.view.View.MeasureSpec.UNSPECIFIED)
+      view.measure(wSpec, hSpec)
+      view.layout(0, 0, pageWidthPx, view.measuredHeight)
 
-      adapter.onLayout(null, attrs, CancellationSignal(), object : PrintDocumentAdapter.LayoutResultCallback() {
-        override fun onLayoutFinished(info: PrintDocumentInfo, changed: Boolean) {
-          // Ghi PDF vào writeFd trên background thread
-          Thread {
-            adapter.onWrite(
-              arrayOf(android.print.PageRange.ALL_PAGES),
-              writeFd,
-              CancellationSignal(),
-              object : PrintDocumentAdapter.WriteResultCallback() {
-                override fun onWriteFinished(pages: Array<out android.print.PageRange>) {
-                  try {
-                    writeFd.close()
-                    // Đọc toàn bộ bytes từ readFd
-                    val stream = ParcelFileDescriptor.AutoCloseInputStream(readFd)
-                    val bytes = stream.readBytes()
-                    stream.close()
-                    callback(bytes, null)
-                  } catch (e: Exception) {
-                    callback(null, e.message)
-                  }
-                }
-                override fun onWriteFailed(error: CharSequence?) {
-                  callback(null, error?.toString() ?: "Write failed")
-                }
-              }
-            )
-          }.start()
-        }
-        override fun onLayoutFailed(error: CharSequence?) {
-          callback(null, error?.toString() ?: "Layout failed")
-        }
-      }, Bundle())
+      val contentHeight = maxOf(view.contentHeight, view.measuredHeight, 1)
+
+      // Tạo bitmap toàn bộ nội dung
+      val bitmap = Bitmap.createBitmap(pageWidthPx, contentHeight, Bitmap.Config.ARGB_8888)
+      val canvas = Canvas(bitmap)
+      canvas.drawColor(Color.WHITE)
+      view.draw(canvas)
+
+      // Chia nội dung thành các trang PDF
+      val pdfDoc = PdfDocument()
+      var yOffset = 0
+      var pageNum = 1
+
+      while (yOffset < contentHeight) {
+        val sliceHeight = minOf(pageHeightPx, contentHeight - yOffset)
+        val pageInfo = PdfDocument.PageInfo.Builder(pageWidthPx, sliceHeight, pageNum).create()
+        val page = pdfDoc.startPage(pageInfo)
+
+        // Vẽ phần bitmap tương ứng với trang này
+        val paint = Paint()
+        page.canvas.drawBitmap(bitmap, 0f, -yOffset.toFloat(), paint)
+        pdfDoc.finishPage(page)
+
+        yOffset += sliceHeight
+        pageNum++
+      }
+
+      bitmap.recycle()
+
+      // Encode PDF thành bytes
+      val out = ByteArrayOutputStream()
+      pdfDoc.writeTo(out)
+      pdfDoc.close()
+      callback(out.toByteArray(), null)
     } catch (e: Exception) {
-      callback(null, e.message)
+      callback(null, e.message ?: "Failed to render PDF")
     }
   }
 
@@ -296,11 +298,9 @@ class HtmlPrinterModule(
     value: String,
   ) {
     out.writeByte(valueTag)
-    // name-length + name
     val nameBytes = name.toByteArray(Charsets.UTF_8)
     out.writeShort(nameBytes.size)
     out.write(nameBytes)
-    // value-length + value
     val valueBytes = value.toByteArray(Charsets.UTF_8)
     out.writeShort(valueBytes.size)
     out.write(valueBytes)
@@ -342,8 +342,7 @@ class HtmlPrinterModule(
       webView.settings.javaScriptEnabled = false
       webView.isDrawingCacheEnabled = true
       webView.setBackgroundColor(Color.WHITE)
-      // Đặt kích thước đủ rộng, chiều cao lớn để render toàn bộ nội dung
-      val measuredWidth = android.view.View.MeasureSpec.makeMeasureSpec(widthPx, android.view.View.MeasureSpec.EXACTLY)
+      val measuredWidth  = android.view.View.MeasureSpec.makeMeasureSpec(widthPx, android.view.View.MeasureSpec.EXACTLY)
       val measuredHeight = android.view.View.MeasureSpec.makeMeasureSpec(30000, android.view.View.MeasureSpec.AT_MOST)
 
       webView.webViewClient = object : WebViewClient() {
@@ -358,7 +357,6 @@ class HtmlPrinterModule(
             return
           }
 
-          // Tạo bitmap với kích thước thực
           val bitmap = try {
             Bitmap.createBitmap(widthPx, contentHeight, Bitmap.Config.ARGB_8888)
           } catch (e: OutOfMemoryError) {
@@ -401,7 +399,6 @@ class HtmlPrinterModule(
     val width  = bitmap.width
     val height = bitmap.height
 
-    // Lấy pixel array (ARGB)
     val pixels = IntArray(width * height)
     bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
 
@@ -409,18 +406,15 @@ class HtmlPrinterModule(
     val gray = FloatArray(width * height)
     for (i in pixels.indices) {
       val p = pixels[i]
-      val r = Color.red(p).toFloat()
-      val g = Color.green(p).toFloat()
-      val b = Color.blue(p).toFloat()
-      gray[i] = 0.299f * r + 0.587f * g + 0.114f * b
+      gray[i] = 0.299f * Color.red(p) + 0.587f * Color.green(p) + 0.114f * Color.blue(p)
     }
 
     // Floyd-Steinberg dither → bits (0=đen/in, 1=trắng/không in)
     val bits = ByteArray(width * height)
     for (y in 0 until height) {
       for (x in 0 until width) {
-        val idx = y * width + x
-        val old = gray[idx]
+        val idx  = y * width + x
+        val old  = gray[idx]
         val new_ = if (old < 128f) 0f else 255f
         bits[idx] = if (new_ < 128f) 0 else 1
         val err = old - new_
@@ -453,7 +447,6 @@ class HtmlPrinterModule(
       val yH = ((chunkH shr 8) and 0xFF).toByte()
       buf.write(byteArrayOf(xL, xH, yL, yH))
 
-      // Encode từng dòng trong chunk
       for (row in y until y + chunkH) {
         for (byteCol in 0 until bytesPerLine) {
           var byte_ = 0
