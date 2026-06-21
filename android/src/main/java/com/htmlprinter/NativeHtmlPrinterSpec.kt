@@ -1,9 +1,11 @@
 /**
  * NativeHtmlPrinterSpec — abstract base cho Turbo Module Android.
  *
- * Viết thủ công thay vì dùng codegen vì package nằm trong monorepo app.
- * Khi tách thành standalone npm package có codegen pipeline riêng,
- * file này sẽ được sinh tự động từ NativeHtmlPrinter.ts spec.
+ * Implement TurboModule để hỗ trợ New Architecture (JSI).
+ * Cũng tương thích với Old Architecture qua ReactContextBaseJavaModule.
+ *
+ * Khi codegen chạy từ NativeHtmlPrinter.ts spec, file này sẽ được
+ * thay bằng generated spec. Hiện tại viết thủ công để tương thích cả hai arch.
  */
 
 package com.htmlprinter
@@ -11,10 +13,11 @@ package com.htmlprinter
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
+import com.facebook.react.turbomodule.core.interfaces.TurboModule
 
 abstract class NativeHtmlPrinterSpec(
   reactContext: ReactApplicationContext,
-) : ReactContextBaseJavaModule(reactContext) {
+) : ReactContextBaseJavaModule(reactContext), TurboModule {
 
   abstract fun printHtml(html: String, pageSize: String, jobName: String, printerUrl: String, promise: Promise)
 
