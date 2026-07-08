@@ -15,6 +15,7 @@
 
 import UIKit
 import WebKit
+import Foundation
 
 // RCTPromiseResolveBlock / RCTPromiseRejectBlock defined via ObjC bridge (.mm).
 // Dùng typealias để Swift thấy type mà không cần bridging header.
@@ -366,6 +367,40 @@ class HtmlPrinterModule: NSObject {
     resolve(nil)
   }
 
+  // MARK: - mDNS/Bonjour printer discovery
+
+  /**
+   * Quét mạng tìm máy in qua mDNS/Bonjour.
+   *
+   * Tìm 2 loại service:
+   *   _ipp._tcp          → máy in IPP (AirPrint, EPSON TM-m30II, ...)
+   *   _pdl-datastream._tcp → máy in ESC/POS qua TCP port 9100 (Xprinter, Star, ...)
+   *
+   * Mỗi service được resolve để lấy host + port trước khi trả về.
+   * Kết quả trả về mảng JSON string — mỗi phần tử là 1 DiscoveredPrinter.
+   */
+  @objc func discoverPrinters(
+    _ timeoutMs: Int,
+    resolve: @escaping RCTPromiseResolveBlock,
+    reject: @escaping RCTPromiseRejectBlock
+  ) {
+    let scanner = PrinterBonjourScanner(timeoutMs: timeoutMs) { printers in
+      let jsonArray = printers.compactMap { printer -> String? in
+        guard let data = try? JSONSerialization.data(withJSONObject: [
+          "name": printer.name,
+          "host": printer.host,
+          "port": printer.port,
+          "type": printer.type,
+        ]) else { return nil }
+        return String(data: data, encoding: .utf8)
+      }
+      resolve(jsonArray)
+    }
+    // Giữ scanner sống cho đến khi hoàn thành
+    objc_setAssociatedObject(self, &AssociatedKeys.bonjourScanner, scanner, .OBJC_ASSOCIATION_RETAIN)
+    scanner.start()
+  }
+
   // MARK: - IPP helpers
 
   /**
@@ -391,7 +426,148 @@ class HtmlPrinterModule: NSObject {
 // MARK: - Associated object keys
 
 private enum AssociatedKeys {
-  static var delegate = "WebViewSnapshotDelegate"
+  static var delegate       = "WebViewSnapshotDelegate"
+  static var bonjourScanner = "PrinterBonjourScanner"
+}
+
+// MARK: - mDNS Bonjour scanner
+
+private struct PrinterInfo {
+  let name: String
+  let host: String
+  let port: Int
+  let type: String  // "ipp" | "escpos"
+}
+
+/**
+ * Quét Bonjour để tìm máy in trong mạng LAN.
+ *
+ * Tìm 2 loại service:
+ *   _ipp._tcp            → IPP printers (AirPrint, network laser/inkjet)
+ *   _pdl-datastream._tcp → ESC/POS thermal printers (Xprinter, Star TSP, ...)
+ *
+ * Flow: browse → found service → resolve → lấy host+port → thêm vào results
+ * Sau `timeoutMs`, dừng browse và gọi completion với danh sách tìm được.
+ */
+private class PrinterBonjourScanner: NSObject, NetServiceBrowserDelegate, NetServiceDelegate {
+
+  private let timeoutMs: Int
+  private let completion: ([PrinterInfo]) -> Void
+
+  private var browsers: [NetServiceBrowser] = []
+  private var pendingServices: Set<NetService> = []
+  private var results: [PrinterInfo] = []
+  private var timer: Timer?
+  private var isDone = false
+
+  // (serviceType, printerType) cần scan
+  private let serviceTypes: [(String, String)] = [
+    ("_ipp._tcp.", "ipp"),
+    ("_pdl-datastream._tcp.", "escpos"),
+  ]
+
+  init(timeoutMs: Int, completion: @escaping ([PrinterInfo]) -> Void) {
+    self.timeoutMs = timeoutMs
+    self.completion = completion
+  }
+
+  func start() {
+    DispatchQueue.main.async { [weak self] in
+      guard let self else { return }
+      // Tạo 1 browser cho mỗi loại service
+      for (serviceType, _) in self.serviceTypes {
+        let browser = NetServiceBrowser()
+        browser.delegate = self
+        browser.searchForServices(ofType: serviceType, inDomain: "local.")
+        self.browsers.append(browser)
+      }
+      // Timeout — dừng scan và trả kết quả
+      self.timer = Timer.scheduledTimer(
+        withTimeInterval: TimeInterval(self.timeoutMs) / 1000.0,
+        repeats: false
+      ) { [weak self] _ in
+        self?.finish()
+      }
+    }
+  }
+
+  private func finish() {
+    guard !isDone else { return }
+    isDone = true
+    timer?.invalidate()
+    timer = nil
+    browsers.forEach { $0.stop() }
+    browsers.removeAll()
+    pendingServices.removeAll()
+    completion(results)
+  }
+
+  // MARK: NetServiceBrowserDelegate
+
+  func netServiceBrowser(
+    _ browser: NetServiceBrowser,
+    didFind service: NetService,
+    moreComing: Bool
+  ) {
+    pendingServices.insert(service)
+    service.delegate = self
+    service.resolve(withTimeout: 5.0)
+  }
+
+  // MARK: NetServiceDelegate
+
+  func netServiceDidResolveAddress(_ sender: NetService) {
+    defer {
+      pendingServices.remove(sender)
+      // Nếu hết pending và đã timeout → kết thúc sớm (không chờ thêm)
+    }
+
+    // Lấy host từ địa chỉ IPv4 đầu tiên
+    guard let addresses = sender.addresses, !addresses.isEmpty else { return }
+    var hostCString = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+    var resolved = false
+
+    for addressData in addresses {
+      let success = addressData.withUnsafeBytes { ptr -> Bool in
+        guard let sockaddr = ptr.baseAddress?.assumingMemoryBound(to: sockaddr.self) else { return false }
+        return getnameinfo(
+          sockaddr, socklen_t(addressData.count),
+          &hostCString, socklen_t(NI_MAXHOST),
+          nil, 0,
+          NI_NUMERICHOST  // trả về IP string, không resolve DNS
+        ) == 0
+      }
+      if success {
+        resolved = true
+        break
+      }
+    }
+
+    guard resolved else { return }
+    let host = String(cString: hostCString)
+    let port = sender.port
+    guard port > 0, !host.isEmpty else { return }
+
+    // Xác định loại máy in từ tên service type
+    let printerType: String
+    if sender.type.contains("pdl-datastream") {
+      printerType = "escpos"
+    } else {
+      printerType = "ipp"
+    }
+
+    let info = PrinterInfo(
+      name: sender.name,
+      host: host,
+      port: port,
+      type: printerType
+    )
+    results.append(info)
+  }
+
+  func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) {
+    pendingServices.remove(sender)
+  }
 }
 
 // MARK: - WKNavigationDelegate để chụp snapshot sau khi render xong

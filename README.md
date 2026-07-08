@@ -96,6 +96,28 @@ await BillPrinter.print(htmlString, {
 });
 ```
 
+### Discover printers on local network
+
+```ts
+const printers = await BillPrinter.discoverPrinters({ timeout: 5000 });
+// printers: DiscoveredPrinter[]
+// [
+//   { name: 'EPSON TM-m30II', host: '192.168.1.100', port: 631, type: 'ipp' },
+//   { name: 'Xprinter XP-N160I', host: '192.168.1.101', port: 9100, type: 'escpos' },
+// ]
+
+// Use result directly for printing:
+const ipp = printers.find(p => p.type === 'ipp');
+if (ipp) {
+  await BillPrinter.print(html, { printerUrl: `ipp://${ipp.host}` });
+}
+
+const escpos = printers.find(p => p.type === 'escpos');
+if (escpos) {
+  await BillPrinter.printEscPos(html, { printerIp: escpos.host });
+}
+```
+
 ### Check availability
 
 ```ts
@@ -126,6 +148,26 @@ if (!BillPrinter.isAvailable()) {
 | `pageSize` | `BillPrinterPageSize` | `A4` | Paper size |
 | `jobName` | `string` | `"Print"` | Job name in print queue |
 | `printerUrl` | `string` | `""` | IPP URL for silent print. Empty → system dialog |
+
+### `BillPrinter.discoverPrinters(options)`
+
+Quét mạng LAN tìm máy in qua mDNS/Bonjour. Không cần thư viện ngoài — dùng native API.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `timeout` | `number` | `5000` | Thời gian scan (ms) |
+
+Returns `Promise<DiscoveredPrinter[]>`:
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | `string` | Tên hiển thị của máy in |
+| `host` | `string` | IP address hoặc hostname |
+| `port` | `number` | Port (631 cho IPP, 9100 cho ESC/POS) |
+| `type` | `"ipp" \| "escpos"` | Loại máy in |
+
+**iOS**: dùng `NetServiceBrowser` (Bonjour) — không cần permission.
+**Android**: dùng `NsdManager` — cần `CHANGE_WIFI_MULTICAST_STATE` (auto-merged từ manifest thư viện).
 
 ### `BillPrinterPageSize`
 

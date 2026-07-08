@@ -25,6 +25,8 @@ import NativeHtmlPrinter from './NativeHtmlPrinter';
 import { BillPrinterPageSize, PAPER_WIDTH_PX } from './html-printer.types';
 import type {
   BillPrintOptions,
+  DiscoveredPrinter,
+  DiscoverPrintersOptions,
   EscPosPrintOptions,
   PrinterErrorCallback,
   PrinterErrorInfo,
@@ -33,6 +35,8 @@ import type {
 export { BillPrinterPageSize, PAPER_WIDTH_PX } from './html-printer.types';
 export type {
   BillPrintOptions,
+  DiscoveredPrinter,
+  DiscoverPrintersOptions,
   EscPosPrintOptions,
   PrinterErrorCallback,
   PrinterErrorInfo,
@@ -144,6 +148,31 @@ export const BillPrinter = {
       );
     } catch (error) {
       handlePrintError(error, onError);
+    }
+  },
+
+  /**
+   * Quét mạng LAN tìm máy in qua mDNS/Bonjour.
+   *
+   * - iOS: dùng NetServiceBrowser (Bonjour) — tìm _ipp._tcp và _pdl-datastream._tcp
+   * - Android: dùng NsdManager — tìm _ipp._tcp và _pdl-datastream._tcp
+   *
+   * @param options.timeout - Thời gian scan ms (mặc định 5000ms)
+   * @returns Danh sách DiscoveredPrinter tìm được trong mạng
+   */
+  async discoverPrinters(
+    options: DiscoverPrintersOptions & { onError?: PrinterErrorCallback } = {},
+  ): Promise<DiscoveredPrinter[]> {
+    const { onError, timeout = 5000 } = options;
+    if (!NativeHtmlPrinter) {
+      return handlePrintError(new Error('PRINTER_MODULE_UNAVAILABLE: pod install chưa được chạy'), onError);
+    }
+    try {
+      const results = await NativeHtmlPrinter.discoverPrinters(timeout);
+      // Native trả về mảng JSON string — parse mỗi item thành DiscoveredPrinter
+      return results.map((item) => JSON.parse(item) as DiscoveredPrinter);
+    } catch (error) {
+      return handlePrintError(error, onError);
     }
   },
 

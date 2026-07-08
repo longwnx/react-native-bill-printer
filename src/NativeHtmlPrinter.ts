@@ -23,6 +23,13 @@ export interface Spec extends TurboModule {
   printHtml(html: string, pageSize: string, jobName: string, printerUrl: string): Promise<void>;
 
   /**
+   * Quét mạng tìm máy in qua mDNS/Bonjour.
+   * @param timeoutMs - Thời gian scan tính bằng ms (mặc định 5000)
+   * @returns Mảng JSON string, mỗi phần tử là DiscoveredPrinter serialized
+   */
+  discoverPrinters(timeoutMs: number): Promise<string[]>;
+
+  /**
    * In HTML qua ESC/POS TCP socket (port 9100 mặc định).
    *
    * Flow: HTML → WebView render bitmap → 1-bit dither → ESC/POS raster image → TCP socket

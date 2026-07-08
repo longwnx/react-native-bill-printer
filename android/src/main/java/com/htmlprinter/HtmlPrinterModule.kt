@@ -24,6 +24,8 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.pdf.PdfDocument
+import android.net.nsd.NsdManager
+import android.net.nsd.NsdServiceInfo
 import android.os.Handler
 import android.os.Looper
 import android.print.PrintAttributes
@@ -33,11 +35,14 @@ import android.webkit.WebViewClient
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.module.annotations.ReactModule
+import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
 import java.net.HttpURLConnection
+import java.net.InetAddress
 import java.net.Socket
 import java.net.URL
+import java.util.concurrent.CopyOnWriteArrayList
 
 @ReactModule(name = HtmlPrinterModule.NAME)
 class HtmlPrinterModule(
@@ -304,6 +309,93 @@ class HtmlPrinterModule(
     val valueBytes = value.toByteArray(Charsets.UTF_8)
     out.writeShort(valueBytes.size)
     out.write(valueBytes)
+  }
+
+  // ── mDNS printer discovery (NsdManager) ────────────────────────────────────
+
+  /**
+   * Quét mạng tìm máy in qua mDNS (NsdManager).
+   *
+   * Tìm 2 loại service:
+   *   _ipp._tcp            → máy in IPP (AirPrint, network printer)
+   *   _pdl-datastream._tcp → máy in ESC/POS thermal (Xprinter, Star, ...)
+   *
+   * Kết quả trả về mảng JSON string — mỗi phần tử là 1 DiscoveredPrinter.
+   */
+  override fun discoverPrinters(timeoutMs: Double, promise: Promise) {
+    val context = reactContext.applicationContext
+    val nsdManager = context.getSystemService(Context.NSD_SERVICE) as? NsdManager
+    if (nsdManager == null) {
+      promise.resolve(emptyList<String>())
+      return
+    }
+
+    val results = CopyOnWriteArrayList<String>()
+    val serviceTypes = listOf(
+      "_ipp._tcp." to "ipp",
+      "_pdl-datastream._tcp." to "escpos",
+    )
+
+    // Track active listeners để stop sau timeout
+    val discoveryListeners = mutableListOf<NsdManager.DiscoveryListener>()
+    val resolveQueue = ArrayDeque<Pair<NsdServiceInfo, String>>()
+    var resolving = false
+
+    fun resolveNext() {
+      if (resolveQueue.isEmpty()) { resolving = false; return }
+      resolving = true
+      val (serviceInfo, printerType) = resolveQueue.removeFirst()
+
+      nsdManager.resolveService(serviceInfo, object : NsdManager.ResolveListener {
+        override fun onResolveFailed(info: NsdServiceInfo?, errorCode: Int) {
+          resolveNext()
+        }
+
+        override fun onServiceResolved(info: NsdServiceInfo) {
+          val host: String = try {
+            info.host?.hostAddress ?: info.host?.canonicalHostName ?: return resolveNext()
+          } catch (_: Exception) { return resolveNext() }
+          val port = info.port
+          if (port <= 0 || host.isEmpty()) return resolveNext()
+
+          val json = JSONObject().apply {
+            put("name", info.serviceName ?: "Unknown Printer")
+            put("host", host)
+            put("port", port)
+            put("type", printerType)
+          }.toString()
+          results.add(json)
+          resolveNext()
+        }
+      })
+    }
+
+    for ((serviceType, printerType) in serviceTypes) {
+      val listener = object : NsdManager.DiscoveryListener {
+        override fun onStartDiscoveryFailed(type: String?, errorCode: Int) {}
+        override fun onStopDiscoveryFailed(type: String?, errorCode: Int) {}
+        override fun onDiscoveryStarted(type: String?) {}
+        override fun onDiscoveryStopped(type: String?) {}
+        override fun onServiceLost(info: NsdServiceInfo?) {}
+
+        override fun onServiceFound(info: NsdServiceInfo) {
+          resolveQueue.add(info to printerType)
+          if (!resolving) resolveNext()
+        }
+      }
+      discoveryListeners.add(listener)
+      try {
+        nsdManager.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, listener)
+      } catch (_: Exception) { /* service type không hỗ trợ → bỏ qua */ }
+    }
+
+    // Dừng scan sau timeout
+    Handler(Looper.getMainLooper()).postDelayed({
+      for (listener in discoveryListeners) {
+        try { nsdManager.stopServiceDiscovery(listener) } catch (_: Exception) {}
+      }
+      promise.resolve(results.toList())
+    }, timeoutMs.toLong())
   }
 
   // ── ESC/POS TCP Print ───────────────────────────────────────────────────────

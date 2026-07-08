@@ -59,6 +59,35 @@ export interface PrinterErrorInfo {
  */
 export type PrinterErrorCallback = (info: PrinterErrorInfo) => void;
 
+/**
+ * Thông tin máy in được tìm thấy qua mDNS/Bonjour.
+ */
+export interface DiscoveredPrinter {
+  /** Tên hiển thị của máy in (ví dụ: "EPSON TM-m30II") */
+  name: string;
+  /** Hostname hoặc IP address */
+  host: string;
+  /** Port (631 cho IPP, 9100 cho ESC/POS TCP) */
+  port: number;
+  /**
+   * Loại service mDNS:
+   *   "ipp"    → máy in IPP (_ipp._tcp)
+   *   "escpos" → máy in ESC/POS thermal (_pdl-datastream._tcp, port 9100)
+   */
+  type: 'ipp' | 'escpos';
+}
+
+/**
+ * Options cho discoverPrinters.
+ */
+export interface DiscoverPrintersOptions {
+  /**
+   * Timeout tính bằng milliseconds — dừng scan sau khi hết thời gian.
+   * Mặc định: 5000ms
+   */
+  timeout?: number;
+}
+
 /** Options cho ESC/POS TCP print */
 export interface EscPosPrintOptions {
   /** IP máy in, ví dụ "192.168.1.100" */
