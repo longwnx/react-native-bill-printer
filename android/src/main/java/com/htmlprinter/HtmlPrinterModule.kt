@@ -18,6 +18,7 @@
 
 package com.htmlprinter
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -26,6 +27,7 @@ import android.graphics.Paint
 import android.graphics.pdf.PdfDocument
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
+import android.net.wifi.WifiManager
 import android.os.Handler
 import android.os.Looper
 import android.print.PrintAttributes
@@ -324,6 +326,7 @@ class HtmlPrinterModule(
    *
    * Kết quả trả về mảng JSON string — mỗi phần tử là 1 DiscoveredPrinter.
    */
+  @SuppressLint("WifiManagerLeak")
   override fun discoverPrinters(timeoutMs: Double, promise: Promise) {
     val context = reactContext.applicationContext
     val nsdManager = context.getSystemService(Context.NSD_SERVICE) as? NsdManager
@@ -331,6 +334,13 @@ class HtmlPrinterModule(
       promise.resolve(WritableNativeArray())
       return
     }
+
+    // Acquire MulticastLock — Android block multicast packets theo mặc định để tiết kiệm pin.
+    // Phải giữ lock này trong suốt quá trình scan để nhận mDNS responses từ máy in.
+    val wifi = context.getSystemService(Context.WIFI_SERVICE) as WifiManager
+    val multicastLock = wifi.createMulticastLock("printerDiscovery")
+    multicastLock.setReferenceCounted(true)
+    multicastLock.acquire()
 
     val results = CopyOnWriteArrayList<String>()
     val serviceTypes = listOf(
@@ -348,9 +358,17 @@ class HtmlPrinterModule(
       resolving = true
       val (serviceInfo, printerType) = resolveQueue.removeFirst()
 
-      nsdManager.resolveService(serviceInfo, object : NsdManager.ResolveListener {
+      // Tạo listener riêng cho mỗi lần resolve để tránh FAILURE_ALREADY_ACTIVE
+      val resolveListener = object : NsdManager.ResolveListener {
         override fun onResolveFailed(info: NsdServiceInfo?, errorCode: Int) {
-          resolveNext()
+          // FAILURE_ALREADY_ACTIVE: NsdManager đang resolve service khác → retry
+          if (errorCode == NsdManager.FAILURE_ALREADY_ACTIVE && info != null) {
+            Handler(Looper.getMainLooper()).postDelayed({
+              try { nsdManager.resolveService(info, this) } catch (_: Exception) { resolveNext() }
+            }, 100)
+          } else {
+            resolveNext()
+          }
         }
 
         override fun onServiceResolved(info: NsdServiceInfo) {
@@ -369,7 +387,11 @@ class HtmlPrinterModule(
           results.add(json)
           resolveNext()
         }
-      })
+      }
+
+      try {
+        nsdManager.resolveService(serviceInfo, resolveListener)
+      } catch (_: Exception) { resolveNext() }
     }
 
     for ((serviceType, printerType) in serviceTypes) {
@@ -391,11 +413,12 @@ class HtmlPrinterModule(
       } catch (_: Exception) { /* service type không hỗ trợ → bỏ qua */ }
     }
 
-    // Dừng scan sau timeout
+    // Dừng scan sau timeout, release MulticastLock
     Handler(Looper.getMainLooper()).postDelayed({
       for (listener in discoveryListeners) {
         try { nsdManager.stopServiceDiscovery(listener) } catch (_: Exception) {}
       }
+      try { multicastLock.release() } catch (_: Exception) {}
       val arr = WritableNativeArray()
       results.forEach { arr.pushString(it) }
       promise.resolve(arr)
