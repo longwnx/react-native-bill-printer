@@ -32,6 +32,7 @@ import android.print.PrintAttributes
 import android.print.PrintManager
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.module.annotations.ReactModule
@@ -326,7 +327,7 @@ class HtmlPrinterModule(
     val context = reactContext.applicationContext
     val nsdManager = context.getSystemService(Context.NSD_SERVICE) as? NsdManager
     if (nsdManager == null) {
-      promise.resolve(emptyList<String>())
+      promise.resolve(Arguments.makeNativeArray(emptyArray<String>()))
       return
     }
 
@@ -394,7 +395,7 @@ class HtmlPrinterModule(
       for (listener in discoveryListeners) {
         try { nsdManager.stopServiceDiscovery(listener) } catch (_: Exception) {}
       }
-      promise.resolve(results.toList())
+      promise.resolve(Arguments.makeNativeArray(results.toTypedArray()))
     }, timeoutMs.toLong())
   }
 
